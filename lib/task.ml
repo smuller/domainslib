@@ -9,12 +9,15 @@ type message =
      it installs its own handler or re-invokes a deep-handler continuation. *)
 | Quit
 
-type task_chan = message Multi_channel.t
+module P = Priority
+
+type deque_pools = message Dpool.t array
 
 type pool_data = {
-  domains : unit Domain.t array;
-  task_chan : task_chan;
-  name: string option
+  domains      : unit Domain.t array;
+  deque_pools  : deque_pools;
+  name         : string option;
+  current_prio : P.priority array
 }
 
 type pool = pool_data option Atomic.t
@@ -22,20 +25,22 @@ type pool = pool_data option Atomic.t
 type 'a promise_state =
   Returned of 'a
 | Raised of exn * Printexc.raw_backtrace
-| Pending of (('a, unit) continuation * task_chan) list
+| Pending of (('a, unit) continuation * P.priority * deque_pools) list
 
 type 'a promise = 'a promise_state Atomic.t
 
-type _ t += Wait : 'a promise * task_chan -> 'a t
+type _ t += Wait : 'a promise * P.priority * deque_pools -> 'a t
 
 let get_pool_data p =
   match Atomic.get p with
   | None -> invalid_arg "pool already torn down"
   | Some p -> p
 
-let cont v (k, c) = Multi_channel.send c (Work (fun _ -> continue k v))
-let discont e bt (k, c) = Multi_channel.send c (Work (fun _ ->
-  discontinue_with_backtrace k e bt))
+let cont v (k, p, c) =
+  Dpool.push_local c.(P.toInt p) (Work (fun _ -> continue k v))
+let discont e bt (k, p, c) =
+  Dpool.push_local c.(P.toInt p)
+    (Work (fun _ -> discontinue_with_backtrace k e bt))
 
 let do_task (type a) (f : unit -> a) (p : a promise) : unit =
   let action, result =
@@ -52,21 +57,23 @@ let do_task (type a) (f : unit -> a) (p : a promise) : unit =
 
 let await pool promise =
   let pd = get_pool_data pool in
+  let proc = Dpool.my_id () in
+  let p = pd.current_prio.(proc) in
   match Atomic.get promise with
   | Returned v -> v
   | Raised (e, bt) -> Printexc.raise_with_backtrace e bt
-  | Pending _ -> perform (Wait (promise, pd.task_chan))
+  | Pending _ -> perform (Wait (promise, p, pd.deque_pools))
 
 let step (type a) (f : a -> unit) (v : a) : unit =
   try_with f v
   { effc = fun (type a) (e : a t) ->
       match e with
-      | Wait (p,c) -> Some (fun (k : (a, _) continuation) ->
+      | Wait (p, r, c) -> Some (fun (k : (a, _) continuation) ->
           let rec loop () =
             let old = Atomic.get p in
             match old with
             | Pending l ->
-                if Atomic.compare_and_set p old (Pending ((k,c)::l)) then ()
+                if Atomic.compare_and_set p old (Pending ((k,r, c)::l)) then ()
                 else (Domain.cpu_relax (); loop ())
             | Returned v -> continue k v
             | Raised (e,bt) -> discontinue_with_backtrace k e bt
@@ -74,10 +81,11 @@ let step (type a) (f : a -> unit) (v : a) : unit =
           loop ())
       | _ -> None }
 
-let async pool f =
+let async pool ?(prio=P.bot) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
-  Multi_channel.send pd.task_chan (Work (fun _ -> step (do_task f) p));
+  Dpool.push_local pd.deque_pools.(P.toInt prio)
+    (Work (fun _ -> step (do_task f) p));
   p
 
 let prepare_for_await chan () =
