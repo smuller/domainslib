@@ -33,6 +33,7 @@ type 'a promise = 'a promise_state Atomic.t
 
 type _ t += Wait : 'a promise * P.priority * pool_data -> 'a t
 type _ t += Io : (unit -> 'a option) * P.priority * pool_data -> 'a t
+type _ t += Yield : pool_data -> unit t
 
 let next_id = Atomic.make 0
 
@@ -146,6 +147,14 @@ let step (type a) (f : a -> unit) (v : a) : unit =
                if Atomic.compare_and_set iow old (handler::old) then ()
                else (Domain.cpu_relax (); loop ())
           in loop ())
+      | Yield pd -> Some (fun (k : (a, _) continuation) ->
+         let p = my_prio pd in
+         P.set_work p;
+         Dpool.push_local
+           pd.deque_pools.(P.toInt p)
+           (my_id pd)
+           (Work (fun _ -> continue k ()))
+                      )
       | _ -> None }
 
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
@@ -217,16 +226,16 @@ let run (type a) pool (f : unit -> a) : a =
     | Pending _ ->
        begin
          let prio = P.highest_with_work () in
-         (* let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
-         in *)
+         (*let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
+         in*)
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
            with
            | Work f -> set_my_prio pd prio; f ()
            | Quit -> failwith "Task.run: tasks are active on pool"
          with Exit ->
-               (P.clear_work prio;
-                Domain.cpu_relax ())
+           (P.clear_work prio;
+              Domain.cpu_relax ())
        end;
        loop ()
    | Returned v -> v
@@ -238,6 +247,8 @@ let run pool f =
   Domain_local_await.using
     ~prepare_for_await:(prepare_for_await (get_pool_data pool))
     ~while_running:(fun () -> run pool f)
+
+let yield pool = perform (Yield (get_pool_data pool))
 
 let named_pools = Hashtbl.create 8
 let named_pools_mutex = Mutex.create ()

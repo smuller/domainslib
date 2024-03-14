@@ -7,12 +7,14 @@ module P = Domainslib.Priority
 let fib_prio = P.bot
 let echo_prio = P.new_priority ()
 
-let rec fib n =
+let rec fib pool n =
   if n < 2 then 1
-  else fib (n-1) + fib (n-2)
+  else
+    ((if n > 35 then T.yield pool);
+      fib pool (n-1) + fib pool (n-2))
 
 let rec fib_par pool n =
-  if n <= 40 then fib n
+  if n <= 40 then fib pool n
   else
     let a = T.async pool ~prio:fib_prio (fun _ -> fib_par pool (n-1)) in
     let b = T.async pool ~prio:fib_prio (fun _ -> fib_par pool (n-2)) in

@@ -54,6 +54,8 @@ val await : pool -> 'a promise -> 'a
     Must be called with a call to {!run} in the dynamic scope to handle the
     internal algebraic effects for task synchronization. *)
 
+val yield : pool -> unit
+
 val parallel_for : ?chunk_size:int -> start:int -> finish:int ->
                    body:(int -> unit) -> pool -> unit
 (** [parallel_for c s f b p] behaves similar to [for i=s to f do b i done], but
