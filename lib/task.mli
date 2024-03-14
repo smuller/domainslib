@@ -104,3 +104,6 @@ val parallel_find : ?chunk_size:int -> start:int -> finish:int ->
     Must be called with a call to {!run} in the dynamic scope to
     handle the internal algebraic effects for task synchronization.
 *)
+
+                                        (** I/O functions **)
+val input_line : pool -> in_channel -> string

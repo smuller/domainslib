@@ -17,7 +17,9 @@ type pool_data = {
   domains      : unit Domain.t array;
   deque_pools  : deque_pools;
   name         : string option;
-  current_prio : P.priority array
+  current_prio : P.priority array;
+  dls          : int Domain.DLS.key;
+  io_waiting   : (unit -> bool) list Atomic.t array
 }
 
 type pool = pool_data option Atomic.t
@@ -25,22 +27,51 @@ type pool = pool_data option Atomic.t
 type 'a promise_state =
   Returned of 'a
 | Raised of exn * Printexc.raw_backtrace
-| Pending of (('a, unit) continuation * P.priority * deque_pools) list
+| Pending of (('a, unit) continuation * P.priority * pool_data) list
 
 type 'a promise = 'a promise_state Atomic.t
 
-type _ t += Wait : 'a promise * P.priority * deque_pools -> 'a t
+type _ t += Wait : 'a promise * P.priority * pool_data -> 'a t
+type _ t += Io : (unit -> 'a option) * P.priority * pool_data -> 'a t
+
+let next_id = Atomic.make 0
+
+let make_dls () =
+  Domain.DLS.new_key (fun () -> Atomic.fetch_and_add next_id 1)
+
+let my_id pd = Domain.DLS.get pd.dls
 
 let get_pool_data p =
   match Atomic.get p with
   | None -> invalid_arg "pool already torn down"
   | Some p -> p
 
-let cont v (k, p, c) =
-  Dpool.push_local c.(P.toInt p) (Work (fun _ -> continue k v))
-let discont e bt (k, p, c) =
-  Dpool.push_local c.(P.toInt p)
+let my_prio pd =
+  let id = my_id pd in
+  pd.current_prio.(id)
+
+let set_my_prio pd p =
+  let id = my_id pd in
+  pd.current_prio.(id) <- p
+
+let cont v (k, p, pd) =
+  P.set_work p;
+  Dpool.push_local pd.deque_pools.(P.toInt p) (my_id pd) (Work (fun _ -> continue k v))
+let discont e bt (k, p, pd) =
+  P.set_work p;
+  Dpool.push_local pd.deque_pools.(P.toInt p) (my_id pd)
     (Work (fun _ -> discontinue_with_backtrace k e bt))
+
+let check_io (pd: pool_data) (proc: int) : unit =
+  (* Printf.printf "check_io on %d\n%!" proc; *)
+  Atomic.set
+    (Array.unsafe_get pd.io_waiting proc)
+    (
+      List.fold_left
+        (fun l f -> if f () then l else f::l)
+        []
+        (Atomic.get (Array.unsafe_get pd.io_waiting proc))
+    )
 
 let do_task (type a) (f : unit -> a) (p : a promise) : unit =
   let action, result =
@@ -57,12 +88,37 @@ let do_task (type a) (f : unit -> a) (p : a promise) : unit =
 
 let await pool promise =
   let pd = get_pool_data pool in
-  let proc = Dpool.my_id () in
+  let proc = my_id pd in
   let p = pd.current_prio.(proc) in
   match Atomic.get promise with
   | Returned v -> v
   | Raised (e, bt) -> Printexc.raise_with_backtrace e bt
-  | Pending _ -> perform (Wait (promise, p, pd.deque_pools))
+  | Pending _ -> perform (Wait (promise, p, pd))
+
+let input_line pool c =
+  let pd = get_pool_data pool in
+  let poll () =
+    match Unix.select [ (Unix.descr_of_in_channel c) ] [] [] 0.01 with
+    | ([], [], []) -> None
+    | _ -> Some (input_line c)
+  in
+  perform (Io (poll, my_prio pd, pd))
+
+let handle_io
+      (pd: pool_data)
+      (k: ('a, _) continuation)
+      (poll: unit -> 'a option)
+      (p: P.priority) () =
+  (* Printf.printf "Handle io\n%!"; *)
+  match poll () with
+  | Some res ->
+     P.set_work p;
+     Dpool.push_local
+       pd.deque_pools.(P.toInt p)
+       (my_id pd)
+       (Work (fun _ -> continue k res))
+    ; true
+  | None -> false
 
 let step (type a) (f : a -> unit) (v : a) : unit =
   try_with f v
@@ -79,16 +135,28 @@ let step (type a) (f : a -> unit) (v : a) : unit =
             | Raised (e,bt) -> discontinue_with_backtrace k e bt
           in
           loop ())
+      | Io (poll, r, pd) -> Some (fun (k : (a, _) continuation) ->
+          let rec loop () =
+            match poll () with
+            | Some v -> continue k v
+            | None ->
+               let iow = Array.unsafe_get pd.io_waiting (my_id pd) in
+               let old = Atomic.get iow in
+               let handler = handle_io pd k poll r in
+               if Atomic.compare_and_set iow old (handler::old) then ()
+               else (Domain.cpu_relax (); loop ())
+          in loop ())
       | _ -> None }
 
-let async pool ?(prio=P.bot) f =
+let async pool ?(prio=(my_prio (get_pool_data pool))) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
-  Dpool.push_local pd.deque_pools.(P.toInt prio)
+  P.set_work prio;
+  Dpool.push_local pd.deque_pools.(P.toInt prio) (my_id pd)
     (Work (fun _ -> step (do_task f) p));
   p
 
-let prepare_for_await chan () =
+let prepare_for_await pd () =
   let promise = Atomic.make (Pending []) in
   let release () =
     match Atomic.get promise with
@@ -97,41 +165,70 @@ let prepare_for_await chan () =
       match Atomic.exchange promise (Returned ()) with
       | Pending ks ->
         ks
-        |> List.iter @@ fun (k, c) ->
-           Multi_channel.send_foreign c (Work (fun _ -> continue k ()))
+        |> List.iter @@ fun (k, r, pd) ->
+                        (P.set_work r;
+                         Dpool.push_global pd.deque_pools.(P.toInt r)
+                           (Work (fun _ -> continue k ())))
       | _ -> ()
   and await () =
     match Atomic.get promise with
     | (Returned _ | Raised _) -> ()
-    | Pending _ -> perform (Wait (promise, chan))
+    | Pending _ -> perform (Wait (promise, my_prio pd, pd))
   in
   Domain_local_await.{ release; await }
 
-let rec worker task_chan =
-  match Multi_channel.recv task_chan with
-  | Quit -> Multi_channel.clear_local_state task_chan
-  | Work f -> f (); worker task_chan
+let rec worker pd =
+  let _ = check_io pd (my_id pd) in
+  let prio = P.highest_with_work () in
+  (*let _ = Printf.printf "%d (w) looking at %d\n%!" (my_id pd) (P.toInt prio)
+  in*)
+  try
+    match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
+    with
+    | Quit -> ()
+    | Work f ->
+       (if P.plt (my_prio pd) prio then
+          begin
+            set_my_prio pd prio;
+            Dpool.push_deque_to_mug
+              pd.deque_pools.(P.toInt (my_prio pd))
+              (my_id pd)
+          end
+       );
+       f ();
+       worker pd
+  with Exit ->
+    (P.clear_work prio;
+     Domain.cpu_relax ();
+     worker pd)
 
-let worker task_chan =
+let worker pd =
   Domain_local_await.using
-    ~prepare_for_await:(prepare_for_await task_chan)
-    ~while_running:(fun () -> worker task_chan)
+    ~prepare_for_await:(prepare_for_await pd)
+    ~while_running:(fun () -> worker pd)
 
 let run (type a) pool (f : unit -> a) : a =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
   step (fun _ -> do_task f p) ();
   let rec loop () : a =
+    let _ = check_io pd (my_id pd) in
     match Atomic.get p with
     | Pending _ ->
-        begin
-          try
-            match Multi_channel.recv_poll pd.task_chan with
-            | Work f -> f ()
-            | Quit -> failwith "Task.run: tasks are active on pool"
-          with Exit -> Domain.cpu_relax ()
-        end;
-        loop ()
+       begin
+         let prio = P.highest_with_work () in
+         (* let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
+         in *)
+         try 
+           match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
+           with
+           | Work f -> set_my_prio pd prio; f ()
+           | Quit -> failwith "Task.run: tasks are active on pool"
+         with Exit ->
+               (P.clear_work prio;
+                Domain.cpu_relax ())
+       end;
+       loop ()
    | Returned v -> v
    | Raised (e, bt) -> Printexc.raise_with_backtrace e bt
   in
@@ -139,21 +236,36 @@ let run (type a) pool (f : unit -> a) : a =
 
 let run pool f =
   Domain_local_await.using
-    ~prepare_for_await:(prepare_for_await (get_pool_data pool).task_chan)
+    ~prepare_for_await:(prepare_for_await (get_pool_data pool))
     ~while_running:(fun () -> run pool f)
 
 let named_pools = Hashtbl.create 8
 let named_pools_mutex = Mutex.create ()
 
+let rec pre_worker p =
+  match Atomic.get p with
+  | None -> Domain.cpu_relax (); pre_worker p
+  | Some pd -> worker pd
+
 let setup_pool ?name ~num_domains () =
   if num_domains < 0 then
     invalid_arg "Task.setup_pool: num_domains must be at least 0"
   else
-  let task_chan = Multi_channel.make (num_domains+1) in
-  let domains = Array.init num_domains (fun _ ->
-    Domain.spawn (fun _ -> worker task_chan))
+  let p = Atomic.make None in
+  let deque_pools = Array.init (P.count ())
+                      (fun _ -> Dpool.make (num_domains+1))
   in
-  let p = Atomic.make (Some {domains; task_chan; name}) in
+  let domains = Array.init num_domains (fun _ ->
+    Domain.spawn (fun _ -> pre_worker p))
+  in
+  let current_prio = Array.make (num_domains + 1) P.bot in
+  let dls = make_dls () in
+  let io_waiting = Array.init (num_domains + 1) (fun _ -> Atomic.make []) in
+  let _ =
+    Atomic.set
+      p
+      (Some {domains; deque_pools; name; current_prio; dls; io_waiting})
+  in
   begin match name with
     | None -> ()
     | Some x ->
@@ -166,9 +278,11 @@ let setup_pool ?name ~num_domains () =
 let teardown_pool pool =
   let pd = get_pool_data pool in
   for _i=1 to Array.length pd.domains do
-    Multi_channel.send pd.task_chan Quit
+    for p=0 to P.count () - 1 do
+      Dpool.push_global pd.deque_pools.(p) Quit
+    done
   done;
-  Multi_channel.clear_local_state pd.task_chan;
+  (* Multi_channel.clear_local_state pd.task_chan; *)
   Array.iter Domain.join pd.domains;
   (* Remove the pool from the table *)
   begin match pd.name with

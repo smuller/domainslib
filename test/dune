@@ -11,6 +11,11 @@
  (name fib_par)
  (libraries domainslib)
  (modules fib_par))
+ 
+(test
+ (name fib_par_echo)
+ (libraries domainslib)
+ (modules fib_par_echo))
 
 (test
  (name kcas_integration)

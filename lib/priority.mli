@@ -1,7 +1,6 @@
 type priority
 
-exception CyclicPriorities
-exception AlreadyInitialized
+exception PriorityError of string
 
 val top : unit -> priority
 (** Returns the top priority currently in the system **)
@@ -28,3 +27,8 @@ val plt : priority -> priority -> bool
                              
 val ple : priority -> priority -> bool
 (** [ple] p1 p2 returns true if and only if p1 <= p2 in the priority order. **)
+
+val get_work : priority -> bool
+val set_work : priority -> unit
+val clear_work : priority -> unit
+val highest_with_work : unit -> priority
