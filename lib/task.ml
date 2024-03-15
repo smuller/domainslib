@@ -33,7 +33,7 @@ type 'a promise = 'a promise_state Atomic.t
 
 type _ t += Wait : 'a promise * P.priority * pool_data -> 'a t
 type _ t += Io : (unit -> 'a option) * P.priority * pool_data -> 'a t
-type _ t += Yield : pool_data -> unit t
+type _ t += Yield : P.priority * pool_data -> unit t
 
 let next_id = Atomic.make 0
 
@@ -96,6 +96,12 @@ let await pool promise =
   | Raised (e, bt) -> Printexc.raise_with_backtrace e bt
   | Pending _ -> perform (Wait (promise, p, pd))
 
+let poll _ promise =
+  match Atomic.get promise with
+  | Returned v -> Some v
+  | Raised (e, bt) -> Printexc.raise_with_backtrace e bt
+  | Pending _ -> None
+
 let input_line pool c =
   let pd = get_pool_data pool in
   let poll () =
@@ -147,8 +153,7 @@ let step (type a) (f : a -> unit) (v : a) : unit =
                if Atomic.compare_and_set iow old (handler::old) then ()
                else (Domain.cpu_relax (); loop ())
           in loop ())
-      | Yield pd -> Some (fun (k : (a, _) continuation) ->
-         let p = my_prio pd in
+      | Yield (p, pd) -> Some (fun (k : (a, _) continuation) ->
          P.set_work p;
          Dpool.push_local
            pd.deque_pools.(P.toInt p)
@@ -248,7 +253,13 @@ let run pool f =
     ~prepare_for_await:(prepare_for_await (get_pool_data pool))
     ~while_running:(fun () -> run pool f)
 
-let yield pool = perform (Yield (get_pool_data pool))
+let yield pool =
+  let pd = get_pool_data pool in
+  let p = my_prio pd in
+  perform (Yield (p, pd))
+
+let change pool ~prio = perform (Yield (prio, get_pool_data pool))
+  
 
 let named_pools = Hashtbl.create 8
 let named_pools_mutex = Mutex.create ()

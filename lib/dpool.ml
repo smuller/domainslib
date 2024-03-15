@@ -114,5 +114,8 @@ let push_global (dp: 'a t) (v: 'a) : unit =
 
 let push_deque_to_mug (dp: 'a t) (proc: int) : unit =
   let d = Array.unsafe_get dp.active proc in
-  D.set_state d Resumable;
-  Q.push dp.mugging d
+  if D.count d > 0 then
+    (
+      D.set_state d Resumable;
+      Q.push dp.mugging d
+    )

@@ -47,14 +47,30 @@ val async : pool -> ?prio:Priority.priority -> 'a task -> 'a promise
 val await : pool -> 'a promise -> 'a
 (** [await p r] waits for the promise [r] to be resolved. During the resolution,
     other tasks in the pool [p] might be run using the calling domain and/or the
-    domains in the pool [p]. If the task associated with the promise have
+    domains in the pool [p]. If the task associated with the promise has
     completed successfully, then the result of the task will be returned. If the
-    task have raised an exception, then [await] raises the same exception.
+    task has raised an exception, then [await] raises the same exception.
+
+    Must be called with a call to {!run} in the dynamic scope to handle the
+    internal algebraic effects for task synchronization. *)
+
+val poll : pool -> 'a promise -> 'a option
+(** [poll p r] checks the status of the promise [r] and returns immediately.
+    If the task associated with the promise has
+    completed successfully, then the result of the task will be returned. If the
+    task has raised an exception, then [poll] raises the same exception.
+    If the task is still executiong, [poll] returns [None].
 
     Must be called with a call to {!run} in the dynamic scope to handle the
     internal algebraic effects for task synchronization. *)
 
 val yield : pool -> unit
+
+val change : pool -> prio:Priority.priority -> unit
+(** [change p r] changes the priority of the calling task to r. This also
+    returns to the schedule, which may result in the current task being
+    un-scheduled if there is a higher-priority task (whether the priority
+    of the current task is raised or lowered). *)
 
 val parallel_for : ?chunk_size:int -> start:int -> finish:int ->
                    body:(int -> unit) -> pool -> unit
