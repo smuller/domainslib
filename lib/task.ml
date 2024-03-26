@@ -457,3 +457,29 @@ let parallel_find (type a) ?(chunk_size=0) ~start ~finish ~body pool =
   in
   work pool body start finish;
   Atomic.get found
+
+module Mutex =
+  struct
+
+    type state = Locked | Unlocked
+
+    type t =
+      { state : state Atomic.t;
+        waiting: (('a, unit) continuation * P.priority * pool_data) list;
+        mutex : Mutex.t
+      }
+
+    let create () =
+      { state = Atomic.make Unlocked;
+        waiting = [];
+        mutex = Mutex.create ()
+      }
+      
+    let lock pool (m: t) =
+      Mutex.lock m.mutex;
+      match m.state with
+      | Unlocked ->
+         Atomic.set M.state Locked;
+         Mutex.unlock m.mutex
+      | Locked -> ()
+  end
