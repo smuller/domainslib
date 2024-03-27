@@ -1,4 +1,9 @@
 (test
+ (name mutex)
+ (libraries domainslib)
+ (modules mutex))
+
+(test
  (name test_chan)
  (libraries domainslib)
  (modules test_chan))
