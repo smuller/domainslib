@@ -34,6 +34,7 @@ type 'a promise = 'a promise_state Atomic.t
 type _ t += Wait : 'a promise * P.priority * pool_data -> 'a t
 type _ t += Io : (unit -> 'a option) * P.priority * pool_data -> 'a t
 type _ t += Yield : P.priority * pool_data -> unit t
+type _ t += Suspend : (('a, unit) continuation -> unit) -> 'a t
 
 let next_id = Atomic.make 0
 
@@ -159,7 +160,8 @@ let step (type a) (f : a -> unit) (v : a) : unit =
            pd.deque_pools.(P.toInt p)
            (my_id pd)
            (Work (fun _ -> continue k ()))
-                      )
+                           )
+      | Suspend f -> Some (fun (k : (a, _) continuation) -> f k)
       | _ -> None }
 
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
@@ -458,28 +460,70 @@ let parallel_find (type a) ?(chunk_size=0) ~start ~finish ~body pool =
   work pool body start finish;
   Atomic.get found
 
-module Mutex =
+module type MUTEX =
+  sig
+    type t
+    val create : unit -> t
+    val lock : pool -> t -> unit
+    val unlock: pool -> t -> unit
+  end
+  
+module Mutex : MUTEX =
   struct
 
-    type state = Locked | Unlocked
+    type state =
+      Locked of ((unit, unit) continuation * P.priority * pool_data) list
+    | Unlocked
 
-    type t =
-      { state : state Atomic.t;
-        waiting: (('a, unit) continuation * P.priority * pool_data) list;
-        mutex : Mutex.t
-      }
+    type t = state Atomic.t
 
-    let create () =
-      { state = Atomic.make Unlocked;
-        waiting = [];
-        mutex = Mutex.create ()
-      }
-      
-    let lock pool (m: t) =
-      Mutex.lock m.mutex;
-      match m.state with
+    let create () = Atomic.make Unlocked
+
+                  (*
+    let print_lock = Mutex.create ()
+    let print f = Mutex.lock print_lock; f (); Mutex.unlock print_lock
+                   *)
+                  
+    let rec lock pool (m: t) =
+      match Atomic.get m with
       | Unlocked ->
-         Atomic.set M.state Locked;
-         Mutex.unlock m.mutex
-      | Locked -> ()
+         if Atomic.compare_and_set m Unlocked (Locked [])
+         then ()
+         else (Domain.cpu_relax (); lock pool m)
+      | Locked _ as old ->
+         let pd = get_pool_data pool in
+         let proc = my_id pd in
+         let p = pd.current_prio.(proc) in
+         perform (Suspend
+                    (fun k ->
+                      let rec loop old =
+                        match old with
+                        | Unlocked ->
+                           if Atomic.compare_and_set m old (Locked [])
+                           then
+                             (* It's unlocked so we want to just quickly
+                              * return, but we're already in the handler
+                              * so it's too late to avoid going back to
+                              * the scheduler. *)
+                             cont () (k, p, pd)
+                           else (Domain.cpu_relax (); loop (Atomic.get m))
+                        | Locked l ->
+                           if Atomic.compare_and_set m old (Locked (l @ [(k,p,pd)]))
+                           then ()
+                           else (Domain.cpu_relax (); loop (Atomic.get m))
+                      in loop old
+           ))
+
+    let rec unlock pool (m: t) =
+      match Atomic.get m with
+      | Unlocked -> failwith "Mutex.unlocked: mutex is already unlocked"
+      | Locked [] as old ->
+         if Atomic.compare_and_set m old Unlocked
+         then ()
+         else unlock pool m
+      | Locked (t::waiting) as old ->
+         if Atomic.compare_and_set m old (Locked waiting)
+         then cont () t
+         else unlock pool m
+         
   end

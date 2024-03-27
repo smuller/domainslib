@@ -125,3 +125,13 @@ val parallel_find : ?chunk_size:int -> start:int -> finish:int ->
 
                                         (** I/O functions **)
 val input_line : pool -> in_channel -> string
+
+module type MUTEX =
+  sig
+    type t
+    val create : unit -> t
+    val lock : pool -> t -> unit
+    val unlock: pool -> t -> unit
+  end
+  
+module Mutex : MUTEX
