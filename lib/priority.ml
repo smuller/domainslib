@@ -27,33 +27,39 @@ let new_priority () =
 
 let new_lessthan _ _ = ()
 
-let work_bitfield = Atomic.make 0
+type work_tracker = int Atomic.t (* Domain.DLS.key *)
 
+let make_work_tracker () =
+  Atomic.make 0
+    (*
+  Domain.DLS.new_key (fun _ -> 0)
+     *)
+  
 let prio_mask p =
   Int.shift_left 1 p
 
-let get_work p =
+let get_work work_bitfield p =
   let work = Atomic.get work_bitfield in
   (Int.logand work (prio_mask p)) <> 0
 
-let rec set_work p =
+let rec set_work work_bitfield p =
   let work = Atomic.get work_bitfield in
   if (Int.logand work (prio_mask p)) = 0 then
     let new_work = Int.logor work (prio_mask p) in
     if Atomic.compare_and_set work_bitfield work new_work then
       ()
-    else set_work p
+    else set_work work_bitfield p
   else
     (* Bit is already set *)
     ()
 
-let rec clear_work p =
+let rec clear_work work_bitfield p =
   let work = Atomic.get work_bitfield in
   if (Int.logand work (prio_mask p)) <> 0 then
     let new_work = Int.logxor work (prio_mask p) in
     if Atomic.compare_and_set work_bitfield work new_work then
       ()
-    else clear_work p
+    else clear_work work_bitfield p
   else
     (* Bit is already cleared *)
     ()
@@ -63,8 +69,8 @@ let rec lin_scan work p =
   else
     if (Int.logand work (prio_mask p)) <> 0 then p
     else lin_scan work (p - 1)
-
-let highest_with_work () =
+  
+let highest_with_work work_bitfield =
   let work = Atomic.get work_bitfield in
   lin_scan work (count ())
   

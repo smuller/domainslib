@@ -28,7 +28,9 @@ val plt : priority -> priority -> bool
 val ple : priority -> priority -> bool
 (** [ple] p1 p2 returns true if and only if p1 <= p2 in the priority order. **)
 
-val get_work : priority -> bool
-val set_work : priority -> unit
-val clear_work : priority -> unit
-val highest_with_work : unit -> priority
+type work_tracker
+val make_work_tracker : unit -> work_tracker
+val get_work : work_tracker -> priority -> bool
+val set_work : work_tracker -> priority -> unit
+val clear_work : work_tracker -> priority -> unit
+val highest_with_work : work_tracker -> priority

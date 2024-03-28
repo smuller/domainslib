@@ -19,6 +19,7 @@ type pool_data = {
   name         : string option;
   current_prio : P.priority array;
   dls          : int Domain.DLS.key;
+  work_tracker : P.work_tracker;
   io_waiting   : (unit -> bool) list Atomic.t array
 }
 
@@ -57,10 +58,10 @@ let set_my_prio pd p =
   pd.current_prio.(id) <- p
 
 let cont v (k, p, pd) =
-  P.set_work p;
+  P.set_work pd.work_tracker p;
   Dpool.push_local pd.deque_pools.(P.toInt p) (my_id pd) (Work (fun _ -> continue k v))
 let discont e bt (k, p, pd) =
-  P.set_work p;
+  P.set_work pd.work_tracker p;
   Dpool.push_local pd.deque_pools.(P.toInt p) (my_id pd)
     (Work (fun _ -> discontinue_with_backtrace k e bt))
 
@@ -120,7 +121,7 @@ let handle_io
   (* Printf.printf "Handle io\n%!"; *)
   match poll () with
   | Some res ->
-     P.set_work p;
+     P.set_work pd.work_tracker p;
      Dpool.push_local
        pd.deque_pools.(P.toInt p)
        (my_id pd)
@@ -155,7 +156,7 @@ let step (type a) (f : a -> unit) (v : a) : unit =
                else (Domain.cpu_relax (); loop ())
           in loop ())
       | Yield (p, pd) -> Some (fun (k : (a, _) continuation) ->
-         P.set_work p;
+         P.set_work pd.work_tracker p;
          Dpool.push_local
            pd.deque_pools.(P.toInt p)
            (my_id pd)
@@ -167,7 +168,7 @@ let step (type a) (f : a -> unit) (v : a) : unit =
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
-  P.set_work prio;
+  P.set_work pd.work_tracker prio;
   Dpool.push_local pd.deque_pools.(P.toInt prio) (my_id pd)
     (Work (fun _ -> step (do_task f) p));
   p
@@ -182,7 +183,7 @@ let prepare_for_await pd () =
       | Pending ks ->
         ks
         |> List.iter @@ fun (k, r, pd) ->
-                        (P.set_work r;
+                        (P.set_work pd.work_tracker r;
                          Dpool.push_global pd.deque_pools.(P.toInt r)
                            (Work (fun _ -> continue k ())))
       | _ -> ()
@@ -195,9 +196,11 @@ let prepare_for_await pd () =
 
 let rec worker pd =
   let _ = check_io pd (my_id pd) in
-  let prio = P.highest_with_work () in
-  (*let _ = Printf.printf "%d (w) looking at %d\n%!" (my_id pd) (P.toInt prio)
-  in*)
+  let prio = P.highest_with_work pd.work_tracker in
+  (*
+  let _ = Printf.printf "%d (w) looking at %d\n%!" (my_id pd) (P.toInt prio)
+  in
+   *)
   try
     match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
     with
@@ -214,7 +217,7 @@ let rec worker pd =
        f ();
        worker pd
   with Exit ->
-    (P.clear_work prio;
+    (P.clear_work pd.work_tracker prio;
      Domain.cpu_relax ();
      worker pd)
 
@@ -232,16 +235,18 @@ let run (type a) pool (f : unit -> a) : a =
     match Atomic.get p with
     | Pending _ ->
        begin
-         let prio = P.highest_with_work () in
-         (*let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
-         in*)
+         let prio = P.highest_with_work pd.work_tracker in
+         (*
+         let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
+         in
+          *)
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
            with
            | Work f -> set_my_prio pd prio; f ()
            | Quit -> failwith "Task.run: tasks are active on pool"
          with Exit ->
-           (P.clear_work prio;
+           (P.clear_work pd.work_tracker prio;
               Domain.cpu_relax ())
        end;
        loop ()
@@ -284,11 +289,12 @@ let setup_pool ?name ~num_domains () =
   in
   let current_prio = Array.make (num_domains + 1) P.bot in
   let dls = make_dls () in
+  let work_tracker = P.make_work_tracker () in
   let io_waiting = Array.init (num_domains + 1) (fun _ -> Atomic.make []) in
   let _ =
     Atomic.set
       p
-      (Some {domains; deque_pools; name; current_prio; dls; io_waiting})
+      (Some {domains; deque_pools; name; current_prio; work_tracker; dls; io_waiting})
   in
   begin match name with
     | None -> ()

@@ -4,6 +4,11 @@
  (modules mutex))
 
 (test
+ (name prio_inv)
+ (libraries domainslib)
+ (modules prio_inv))
+
+(test
  (name test_chan)
  (libraries domainslib)
  (modules test_chan))
