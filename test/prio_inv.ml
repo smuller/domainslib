@@ -25,8 +25,11 @@ let low_thread pool () =
   Printf.printf "Starting low!\n%!";
   M.lock pool mut;
   ignore (fib pool 39);
-  Printf.printf "Done with low!\n%!";
-  M.unlock pool mut
+  Printf.printf "low done with mutex!\n%!";
+  M.unlock pool mut;
+  ignore (fib pool 41);
+  Printf.printf "Done with low!\n%!"
+  
 
 
 let med_thread pool () =

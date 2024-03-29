@@ -14,7 +14,10 @@ let top () = count ()
 
 let plt = (<)
 let ple = (<=)
+let peq = (=)
 
+let join = max
+        
 (* XXX currently assumes priorities are declared in order from low to high *)
         
 let new_priority () =
