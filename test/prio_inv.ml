@@ -24,9 +24,12 @@ let rec fib pool n =
 let low_thread pool () =
   Printf.printf "Starting low!\n%!";
   M.lock pool mut;
+  Printf.printf "Locked\n%!";
   ignore (fib pool 39);
   Printf.printf "low done with mutex!\n%!";
   M.unlock pool mut;
+  Printf.printf "Unlocked\n%!";
+  T.change pool ~prio:low;
   ignore (fib pool 41);
   Printf.printf "Done with low!\n%!"
   
@@ -56,8 +59,11 @@ let all pool () =
   let _ = T.async pool ~prio:low (low_thread pool) in
   let _ = fib_no_yield 36 in
   let _ = T.async pool ~prio:medium (med_thread pool) in
+  let _ = Printf.printf "Started medium\n%!" in
   let _ = fib_no_yield 36 in
+  let _ = Printf.printf "Starting high\n%!" in
   let _ = T.async pool ~prio:high (high_thread pool) in
+  let _ = Printf.printf "Started high\n%!" in
   loop ()
     (*
   ignore (fib_no_yield 43);

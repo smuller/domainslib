@@ -10,7 +10,7 @@ let toInt p = p
 
 let count () = !numberOfPrios
 
-let top () = count ()
+let top () = count () - 1
 
 let plt = (<)
 let ple = (<=)

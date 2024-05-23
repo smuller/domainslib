@@ -64,7 +64,7 @@ let push_if_needed (dp: 'a t) (d: 'a deque) : unit =
   if D.count d > 0 then
     Q.push dp.regular d
              
-let steal (dp: 'a t) (proc: int) : 'a =
+let rec steal (dp: 'a t) (proc: int) : 'a =
   try
     let d = Q.pop dp.regular in
     let a =
@@ -79,9 +79,10 @@ let steal (dp: 'a t) (proc: int) : 'a =
     in
     push_if_needed dp d;
     a
-  with Exit | Q.Empty -> raise Exit (* steal dp proc *)
+  with Exit -> steal dp proc
+     | Q.Empty -> raise Exit (* steal dp proc *)
   
-let mug (dp: 'a t) (proc: int) : 'a =
+let rec mug (dp: 'a t) (proc: int) : 'a =
   try
     let d = Q.pop dp.mugging in
     let a =
@@ -90,12 +91,13 @@ let mug (dp: 'a t) (proc: int) : 'a =
          let a = D.pop d in
          dp.active.(proc) <- d;
          a
-      | _ ->
-         D.steal d;
+      | _ -> failwith "non-resumable deque in mugging queue"
+                      (*D.steal d; *)
     in
     push_if_needed dp d;
     a
-  with Exit | Q.Empty -> steal dp proc
+  with Exit -> mug dp proc
+     | Q.Empty -> steal dp proc
           
 let pop (dp: 'a t) (proc: int) : 'a =
   let d = Array.unsafe_get dp.active proc in

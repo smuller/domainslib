@@ -72,6 +72,9 @@ val change : pool -> prio:Priority.priority -> unit
     un-scheduled if there is a higher-priority task (whether the priority
     of the current task is raised or lowered). *)
 
+val current_priority : pool -> Priority.priority
+(** Returns the current priority of the calling task. *)
+
 val parallel_for : ?chunk_size:int -> start:int -> finish:int ->
                    body:(int -> unit) -> pool -> unit
 (** [parallel_for c s f b p] behaves similar to [for i=s to f do b i done], but
@@ -129,9 +132,21 @@ val input_line : pool -> in_channel -> string
 module type MUTEX =
   sig
     type t
-    val create : unit -> t
+    exception CeilingViolated
+    val create : ?ceil:Priority.priority -> unit -> t
+    (** Creates a new mutex object. Mutexes implement the "priority protection"
+        or "priority ceiling emulation" protocol. The optional [ceil] argument
+        is the priority ceiling of the mutex, and must be greater than or
+        equal to any priority with which the mutex might be locked.
+        If unspecified, [ceil] defaults to Priority.top. *)
     val lock : pool -> t -> unit
+    (** Locks the given mutex. If the mutex's priority ceiling is greater
+        than the current priority, the calling thread is temporarily promoted
+        to the priority ceiling. *)
     val unlock: pool -> t -> unit
+    (** Unlocks the mutex. If the thread was promoted to a higher priority
+        for its critical section, it now regains the priority it had upon
+        calling [lock]. *)
   end
   
 module Mutex : MUTEX
