@@ -28,8 +28,6 @@ let new_priority () =
      count () - 1
     )
 
-let new_lessthan _ _ = ()
-
 type work_tracker = int Atomic.t (* Domain.DLS.key *)
 
 let make_work_tracker () =

@@ -139,10 +139,12 @@ module type MUTEX =
         is the priority ceiling of the mutex, and must be greater than or
         equal to any priority with which the mutex might be locked.
         If unspecified, [ceil] defaults to Priority.top. *)
+    
     val lock : pool -> t -> unit
     (** Locks the given mutex. If the mutex's priority ceiling is greater
         than the current priority, the calling thread is temporarily promoted
         to the priority ceiling. *)
+
     val unlock: pool -> t -> unit
     (** Unlocks the mutex. If the thread was promoted to a higher priority
         for its critical section, it now regains the priority it had upon
