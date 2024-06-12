@@ -15,7 +15,8 @@ val count : unit -> int
 val toInt : priority -> int
   
 val new_priority : unit -> priority
-(** Create a new priority. Must be called before [setup_pool]. **)
+(** Create a new priority higher than all existing priorities.
+     Must be called before [setup_pool]. **)
 
 val plt : priority -> priority -> bool
 (** [plt] p1 p2 returns true if and only if p1 < p2 in the priority order. **)
