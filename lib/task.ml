@@ -35,7 +35,7 @@ type 'a promise = 'a promise_state Atomic.t
 type _ t += Wait : 'a promise * P.priority * pool_data -> 'a t
 type _ t += Io : (unit -> 'a option) * P.priority * pool_data -> 'a t
 type _ t += Yield : P.priority * pool_data -> unit t
-type _ t += YieldAndContinue  : P.priority * pool_data * ((unit, unit) continuation * P.priority * pool_data) -> unit t
+(* type _ t += YieldAndContinue  : P.priority * pool_data * ((unit, unit) continuation * P.priority * pool_data) -> unit t *)
 type _ t += Suspend : (('a, unit) continuation -> unit) -> 'a t
 
 let next_id = Atomic.make 0
@@ -63,6 +63,7 @@ let set_my_prio pd p =
   pd.current_prio.(id) <- p
 
 let cont v (k, p, pd) =
+  Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p);
   Dpool.push_local pd.deque_pools.(P.toInt p) (my_id pd) (Work (fun _ -> continue k v));
   P.set_work pd.work_tracker p
 
@@ -162,28 +163,30 @@ let step (type a) (f : a -> unit) (v : a) : unit =
                else (Domain.cpu_relax (); loop ())
           in loop ())
       | Yield (p, pd) -> Some (fun (k : (a, _) continuation) ->
-         (*Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p); *)
+         Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p);
          Dpool.push_local
            pd.deque_pools.(P.toInt p)
            (my_id pd)
            (Work (fun _ -> continue k ()));
          P.set_work pd.work_tracker p
                            )
+      (*
       | YieldAndContinue (p, pd, t) -> Some (fun (k : (a, _) continuation) ->
-         (*Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p); *)
+         Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p);
          Dpool.push_local
            pd.deque_pools.(P.toInt p)
            (my_id pd)
            (Work (fun _ -> continue k ()));
          P.set_work pd.work_tracker p;
          cont () t)
+         *)
       | Suspend f -> Some (fun (k : (a, _) continuation) -> f k)
       | _ -> None }
 
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
-  (* Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt prio); *)
+  Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt prio);
   Dpool.push_local pd.deque_pools.(P.toInt prio) (my_id pd)
     (Work (fun _ -> step (do_task f) p));
   P.set_work pd.work_tracker prio;
@@ -213,10 +216,10 @@ let prepare_for_await pd () =
 let rec worker pd =
   let _ = check_io pd (my_id pd) in
   let prio = P.highest_with_work pd.work_tracker in
-(*
+
   let _ = Printf.printf "%d (w) looking at %d\n%!" (my_id pd) (P.toInt prio)
   in
- *)
+
   try
     match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
     with
@@ -234,8 +237,28 @@ let rec worker pd =
        worker pd
   with Exit ->
     (P.clear_work pd.work_tracker prio;
-     Domain.cpu_relax ();
-     worker pd)
+     ( (* Check again *)
+       try
+         match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
+         with
+         | Quit -> ()
+         | Work f ->
+            (if P.plt (my_prio pd) prio then
+               begin
+                 Dpool.push_deque_to_mug
+                   pd.deque_pools.(P.toInt (my_prio pd))
+                   (my_id pd)
+               end
+            );
+            P.set_work pd.work_tracker prio;
+            set_my_prio pd prio;
+            f ();
+            worker pd
+       with Exit ->
+         (Domain.cpu_relax ();
+          worker pd)
+     )
+    )
 
 let worker pd =
   Domain_local_await.using
@@ -252,18 +275,44 @@ let run (type a) pool (f : unit -> a) : a =
     | Pending _ ->
        begin
          let prio = P.highest_with_work pd.work_tracker in
-(*
+
          let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
          in
- *)
+
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
            with
-           | Work f -> set_my_prio pd prio; f ()
+           | Work f ->
+              (if P.plt (my_prio pd) prio then
+               begin
+                 Dpool.push_deque_to_mug
+                   pd.deque_pools.(P.toInt (my_prio pd))
+                   (my_id pd)
+               end
+              );
+              set_my_prio pd prio;
+              f ()
            | Quit -> failwith "Task.run: tasks are active on pool"
          with Exit ->
            (P.clear_work pd.work_tracker prio;
-              Domain.cpu_relax ())
+            (* Check again *)
+            (try 
+               match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
+               with
+               | Work f ->
+                  (if P.plt (my_prio pd) prio then
+                     begin
+                       Dpool.push_deque_to_mug
+                         pd.deque_pools.(P.toInt (my_prio pd))
+                         (my_id pd)
+                     end
+                  );
+                  P.set_work pd.work_tracker prio;
+                  set_my_prio pd prio;
+                  f ()
+               | Quit -> failwith "Task.run: tasks are active on pool"
+             with Exit ->
+               (Domain.cpu_relax ())))
        end;
        loop ()
    | Returned v -> v
@@ -496,17 +545,20 @@ module type MUTEX =
 module Mutex : MUTEX =
   struct
 
+    module Q = Saturn.Queue
+
     type state =
       Locked of ((unit, unit) continuation * P.priority * pool_data) list
     | Unlocked
 
     type t =
-      { state: state Atomic.t;
+      { mutable state: state;
         ceiling: P.priority;
         (* If currently running at a higher priority, we will return to this one
          * upon unlocking
          *)
-        mutable old_prio: P.priority option
+        mutable old_prio: P.priority option;
+        mutex: Mutex.t
       }
 
     exception CeilingViolated
@@ -517,9 +569,10 @@ module Mutex : MUTEX =
         | None -> P.top ()
         | Some c -> c
       in
-      { state = Atomic.make Unlocked;
+      { state = (* Atomic.make *) Unlocked;
         ceiling = ceil;
-        old_prio = None
+        old_prio = None;
+        mutex = Mutex.create ()
       }
 
                   (*
@@ -527,87 +580,179 @@ module Mutex : MUTEX =
     let print f = Mutex.lock print_lock; f (); Mutex.unlock print_lock
                    *)
                   
-    let rec lock pool (m: t) =
-      let _ = Printf.printf "lock\n%!" in
+    let lock pool (m: t) =
+      let pd = get_pool_data pool in
+      let proc = my_id pd in
+      let _ = Printf.printf "%d lock\n%!" proc in
       let _ =
         let my_p = current_priority pool in
         if not (P.ple my_p m.ceiling) then
-           raise CeilingViolated
+          (Printf.printf "PRIORITY CEILING VIOLATION\n%!";
+           raise CeilingViolated)
       in
       let maybe_promote_me () =
         let my_p = current_priority pool in
         if P.plt my_p m.ceiling then
-          (m.old_prio <- Some my_p;
+          (Printf.printf "%d promote\n%!" proc;
+           m.old_prio <- Some my_p;
+           change pool ~prio:m.ceiling;
+          )
+      in
+      Mutex.lock m.mutex;
+      match m.state with
+      | Unlocked ->
+         m.state <- Locked [];
+         Mutex.unlock m.mutex;
+         maybe_promote_me ()
+      | Locked l ->
+         let _ = Printf.printf "%d contention\n%!" proc in
+         let p = pd.current_prio.(proc) in
+         begin
+           perform (Suspend
+                      (fun k ->
+                        m.state <- (Locked (l @ [(k, p, pd)]));
+                        Printf.printf "%d added me\n%!" proc;
+                        Mutex.unlock m.mutex));
+           Printf.printf "%d woke up\n%!" proc;
+           (* maybe_promote_me () *)
+         end
+
+                                                    (*
+              
+    let rec lock pool (m: t) =
+      let pd = get_pool_data pool in
+      let proc = my_id pd in
+      let _ = Printf.printf "%d lock\n%!" proc in
+      let _ =
+        let my_p = current_priority pool in
+        if not (P.ple my_p m.ceiling) then
+          (Printf.printf "PRIORITY CEILING VIOLATION\n%!";
+           raise CeilingViolated)
+      in
+      let maybe_promote_me () =
+        let my_p = current_priority pool in
+        if P.plt my_p m.ceiling then
+          (Printf.printf "%d promote\n%!" proc;
+           m.old_prio <- Some my_p;
            change pool ~prio:m.ceiling;
           )
       in
       match Atomic.get m.state with
       | Unlocked ->
-         if Atomic.compare_and_set m.state Unlocked (Locked [])
+         if Atomic.compare_and_set m.state Unlocked (Locked
          then maybe_promote_me ()
          else (Domain.cpu_relax (); lock pool m)
-      | Locked _ as old ->
-         let _ = Printf.printf "contention\n%!" in
-         let pd = get_pool_data pool in
-         let proc = my_id pd in
+      | Locked as old ->
+         let _ = Printf.printf "%d contention\n%!" proc in
          let p = pd.current_prio.(proc) in
          begin
            perform (Suspend
                     (fun k ->
                       let rec loop old =
+                        let _ = Printf.printf "%d lock_loop\n%!" proc in
                         match old with
                         | Unlocked ->
-                           if Atomic.compare_and_set m.state old (Locked [])
+                           if Atomic.compare_and_set m.state old Locked
                            then
                              (* It's unlocked so we want to just quickly
                               * return, but we're already in the handler
                               * so it's too late to avoid going back to
                               * the scheduler. *)
-                             (Printf.printf "Just kidding\n%!";
+                             (Printf.printf "%d Just kidding\n%!" proc;
                               cont () (k, p, pd))
                            else (Domain.cpu_relax (); loop (Atomic.get m.state))
-                        | Locked l ->
+                        | Locked ->
+                           Q.push m.waiting (k, p, pd);
+                           Printf.printf "%d added me\n%!" proc
+                     (*
                            if Atomic.compare_and_set m.state old (Locked (l @ [(k,p,pd)]))
-                           then (Printf.printf "added me\n%!"; ())
+                           then (Printf.printf "%d added me\n%!" proc; ())
                            else (Domain.cpu_relax (); loop (Atomic.get m.state))
+                      *)
                       in loop old
              ));
            (* Make sure we can still get the lock *)
            (* lock pool m; *)
+           Printf.printf "%d woke up\n%!" proc;
            maybe_promote_me ()
          end
+                                                     *)
 
     let unlock pool (m: t) =
+      let pd = get_pool_data pool in
+      let proc = my_id pd in
+      let _ = Printf.printf "%d unlock\n%!" proc in
       let old_p = m.old_prio in
       let _ = m.old_prio <- None in
       let maybe_demote_me () =
         match old_p with
          | None -> ()
-         | Some p -> change pool~prio:p
+         | Some p -> (Printf.printf "%d demote\n%!" proc; change pool~prio:p)
+      in
+      Mutex.lock m.mutex;
+      match m.state with
+      | Unlocked -> failwith "Mutex.unlocked: mutex is already unlocked"
+      | Locked [] ->
+         Printf.printf "%d unlocking: no waiters\n%!" proc;
+         m.state <- Unlocked;
+         Mutex.unlock m.mutex;
+         maybe_demote_me ()
+      | Locked ((k, p, pd)::waiting) ->
+         Printf.printf "%d unlocking: %d waiters\n%!" proc ((List.length waiting) + 1);
+         m.state <- Locked waiting;
+         let p' =
+           if P.plt p m.ceiling then
+             (Printf.printf "%d promote before waking up\n%!" proc;
+              m.old_prio <- Some p;
+              m.ceiling)
+           else p
+         in
+         cont () (k, p', pd);
+         Mutex.unlock m.mutex;
+         maybe_demote_me ()
+
+    (*
+let unlock pool (m: t) =
+      let pd = get_pool_data pool in
+      let proc = my_id pd in
+      let _ = Printf.printf "%d unlock\n%!" proc in
+      let old_p = m.old_prio in
+      let _ = m.old_prio <- None in
+      let maybe_demote_me () =
+        match old_p with
+         | None -> ()
+         | Some p -> (Printf.printf "%d demote\n%!" proc; change pool~prio:p)
       in
       let rec unlock_loop () =
-        let _ = Printf.printf "unlock\n%!" in
+        let _ = Printf.printf "%d unlock_loop\n%!" proc in
         match Atomic.get m.state with
         | Unlocked -> failwith "Mutex.unlocked: mutex is already unlocked"
-        | Locked [] as old ->
-           Printf.printf "unlocking: no waiters\n%!";
+        | Locked ->
+           
+        | Locked as old ->
+           Printf.printf "%d unlocking: no waiters\n%!" proc;
            if Atomic.compare_and_set m.state old Unlocked
            then maybe_demote_me ()
            else unlock_loop ()
         | Locked (t::waiting) as old ->
+           Printf.printf "%d unlocking: %d waiters\n%!" ((List.length waiting) + 1) proc;
            if Atomic.compare_and_set m.state old (Locked waiting)
            then
+             (cont () t; maybe_demote_me ())
+             (*
              (match old_p with
-              | None -> Printf.printf "unlocking: no demotion\n%!";()
+              | None -> (Printf.printf "%d unlocking: no demotion\n%!" proc;
+                         cont () t)
               | Some p ->
                  (* If we change to a lower priority, we might get
                   * unscheduled before we call cont on t, so we need to
                   * do both at the same time *)
-                 Printf.printf "unlocking\n%!";
+                 Printf.printf "%d unlocking\n%!" proc;
                  perform (YieldAndContinue (p, get_pool_data pool, t))
-             )
+             )*)
            else unlock_loop ()
       in
       unlock_loop ()
+     *)
          
   end

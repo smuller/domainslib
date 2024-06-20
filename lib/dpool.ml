@@ -11,29 +11,44 @@ module D =
     type 'a deque = {
         q             : 'a D.t;
         mutable state : deque_state;
-        count         : int Atomic.t
+        count         : int Atomic.t;
+        id            : int
       }
 
+    let next_id = ref 0
+
     let new_deque state _ =
+      let id = !next_id in
+      next_id := id + 1;
       { q = D.create ();
         state = state;
-        count = Atomic.make 0 }
+        count = Atomic.make 0;
+        id = id}
 
     let push q v =
       D.push q.q v;
-      Atomic.incr q.count
+      Atomic.incr q.count;
+      Printf.printf "to %d\n%!" q.id;
+      Printf.printf "after push: %d\n%!" (Atomic.get (q.count))
+
 
     let pop q =
       try
+        Printf.printf "from %d\n%!" q.id;
+        Printf.printf "before pop: %d\n%!" (Atomic.get (q.count));
         let res = D.pop q.q in
         Atomic.decr q.count;
+        Printf.printf "after pop: %d\n%!" (Atomic.get (q.count));
         res
       with Exit -> raise Exit
 
     let steal q =
       try
+        Printf.printf "steal from %d\n%!" q.id;
+        Printf.printf "before pop: %d\n%!" (Atomic.get (q.count));
         let res = D.steal q.q in
         Atomic.decr q.count;
+        Printf.printf "after steal: %d\n%!" (Atomic.get (q.count));
         res
       with Exit -> raise Exit
 

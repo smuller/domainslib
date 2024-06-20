@@ -44,6 +44,7 @@ let get_work work_bitfield p =
   (Int.logand work (prio_mask p)) <> 0
 
 let rec set_work work_bitfield p =
+  let _ = Printf.printf "setting %d\n%!" p in
   let work = Atomic.get work_bitfield in
   if (Int.logand work (prio_mask p)) = 0 then
     let new_work = Int.logor work (prio_mask p) in
@@ -55,6 +56,7 @@ let rec set_work work_bitfield p =
     ()
 
 let rec clear_work work_bitfield p =
+  let _ = Printf.printf "clearing %d\n%!" p in
   let work = Atomic.get work_bitfield in
   if (Int.logand work (prio_mask p)) <> 0 then
     let new_work = Int.logxor work (prio_mask p) in
