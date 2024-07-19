@@ -63,7 +63,6 @@ let set_my_prio pd p =
   pd.current_prio.(id) <- p
 
 let cont v (k, p, pd) =
-  Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p);
   Dpool.push_local pd.deque_pools.(P.toInt p) (my_id pd) (Work (fun _ -> continue k v));
   P.set_work pd.work_tracker p
 
@@ -163,7 +162,6 @@ let step (type a) (f : a -> unit) (v : a) : unit =
                else (Domain.cpu_relax (); loop ())
           in loop ())
       | Yield (p, pd) -> Some (fun (k : (a, _) continuation) ->
-         Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt p);
          Dpool.push_local
            pd.deque_pools.(P.toInt p)
            (my_id pd)
@@ -186,7 +184,6 @@ let step (type a) (f : a -> unit) (v : a) : unit =
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
-  Printf.printf "%d pushing at %d\n%!" (my_id pd) (P.toInt prio);
   Dpool.push_local pd.deque_pools.(P.toInt prio) (my_id pd)
     (Work (fun _ -> step (do_task f) p));
   P.set_work pd.work_tracker prio;
@@ -216,9 +213,6 @@ let prepare_for_await pd () =
 let rec worker pd =
   let _ = check_io pd (my_id pd) in
   let prio = P.highest_with_work pd.work_tracker in
-
-  let _ = Printf.printf "%d (w) looking at %d\n%!" (my_id pd) (P.toInt prio)
-  in
 
   try
     match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
@@ -275,9 +269,6 @@ let run (type a) pool (f : unit -> a) : a =
     | Pending _ ->
        begin
          let prio = P.highest_with_work pd.work_tracker in
-
-         let _ = Printf.printf "%d (r) looking at %d\n%!" (my_id pd) (P.toInt prio)
-         in
 
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
@@ -583,7 +574,6 @@ module Mutex : MUTEX =
     let lock pool (m: t) =
       let pd = get_pool_data pool in
       let proc = my_id pd in
-      let _ = Printf.printf "%d lock\n%!" proc in
       let _ =
         let my_p = current_priority pool in
         if not (P.ple my_p m.ceiling) then
@@ -593,8 +583,7 @@ module Mutex : MUTEX =
       let maybe_promote_me () =
         let my_p = current_priority pool in
         if P.plt my_p m.ceiling then
-          (Printf.printf "%d promote\n%!" proc;
-           m.old_prio <- Some my_p;
+          (m.old_prio <- Some my_p;
            change pool ~prio:m.ceiling;
           )
       in
@@ -605,15 +594,12 @@ module Mutex : MUTEX =
          Mutex.unlock m.mutex;
          maybe_promote_me ()
       | Locked l ->
-         let _ = Printf.printf "%d contention\n%!" proc in
          let p = pd.current_prio.(proc) in
          begin
            perform (Suspend
                       (fun k ->
                         m.state <- (Locked (l @ [(k, p, pd)]));
-                        Printf.printf "%d added me\n%!" proc;
                         Mutex.unlock m.mutex));
-           Printf.printf "%d woke up\n%!" proc;
            (* maybe_promote_me () *)
          end
 
@@ -679,31 +665,25 @@ module Mutex : MUTEX =
                                                      *)
 
     let unlock pool (m: t) =
-      let pd = get_pool_data pool in
-      let proc = my_id pd in
-      let _ = Printf.printf "%d unlock\n%!" proc in
       let old_p = m.old_prio in
       let _ = m.old_prio <- None in
       let maybe_demote_me () =
         match old_p with
          | None -> ()
-         | Some p -> (Printf.printf "%d demote\n%!" proc; change pool~prio:p)
+         | Some p -> (change pool~prio:p)
       in
       Mutex.lock m.mutex;
       match m.state with
       | Unlocked -> failwith "Mutex.unlocked: mutex is already unlocked"
       | Locked [] ->
-         Printf.printf "%d unlocking: no waiters\n%!" proc;
          m.state <- Unlocked;
          Mutex.unlock m.mutex;
          maybe_demote_me ()
       | Locked ((k, p, pd)::waiting) ->
-         Printf.printf "%d unlocking: %d waiters\n%!" proc ((List.length waiting) + 1);
          m.state <- Locked waiting;
          let p' =
            if P.plt p m.ceiling then
-             (Printf.printf "%d promote before waking up\n%!" proc;
-              m.old_prio <- Some p;
+             (m.old_prio <- Some p;
               m.ceiling)
            else p
          in
