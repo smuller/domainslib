@@ -162,3 +162,8 @@
  (modules chan_stm_tests)
  (libraries qcheck-stm.sequential qcheck-stm.domain domainslib)
  (action (run %{test} --verbose)))
+
+(test
+ (name webserver)
+ (libraries domainslib)
+ (modules webserver))
