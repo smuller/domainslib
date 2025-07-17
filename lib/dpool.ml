@@ -7,6 +7,8 @@ module type DEQUE =
     type deque_state = Active of int | Suspended | Resumable
 
     type 'a deque
+
+    exception Empty
     
     val new_deque : deque_state -> 'a deque
     val is_mine : 'a deque -> int -> bool
@@ -25,8 +27,10 @@ module type DEQUE =
 module D : DEQUE =
   struct
 
-    module D = Saturn.Work_stealing_deque.M
+    module D = Saturn.Work_stealing_deque
     type deque_state = Active of int | Suspended | Resumable
+
+    exception Empty = D.Empty
          
     type 'a deque = {
         q             : 'a D.t;
@@ -57,21 +61,21 @@ module D : DEQUE =
 
     let rec pop q =
       try
-        let res = D.pop q.q in
+        let res = D.pop_exn q.q in
         Atomic.decr q.count;
         res
-      with Exit ->
+      with D.Empty | Exit ->
             if Atomic.get (q.count) > 0 then pop q
-            else raise Exit
+            else raise Empty
 
     let rec steal q =
       try
-        let res = D.steal q.q in
+        let res = D.steal_exn q.q in
         Atomic.decr q.count;
         res
-      with Exit ->
+      with D.Empty | Exit ->
         if Atomic.get (q.count) > 0 then steal q
-        else raise Exit
+        else raise Empty
 
     let count q = Atomic.get q.count
     let id q = q.id
@@ -124,48 +128,50 @@ let push_if_needed (dp: 'a t) (d: 'a deque) : unit =
              
 let rec steal (dp: 'a t) (proc: int) : 'a =
   try
-    let d = Q.pop dp.regular in
-    if D.is_mine d proc then
-      (assert (D.count d = 0);
-       steal dp proc)
-    else
-      let a =
-        if D.cas_state d Resumable (Active proc) then
-          (* We now own the deque; it may be empty but that's OK *)
-          (dp.active.(proc) <- d;
-           assert (D.is_mine d proc);
-           D.pop d
-          )
-        else D.steal d
-      in
-      push_if_needed dp d;
-      a
-  with Exit -> steal dp proc
-     | Q.Empty -> raise Exit (* steal dp proc *)
+    match Q.pop_opt dp.regular with
+    | Some d ->
+       if D.is_mine d proc then
+         (assert (D.count d = 0);
+          steal dp proc)
+       else
+         let a =
+           if D.cas_state d Resumable (Active proc) then
+             (* We now own the deque; it may be empty but that's OK *)
+             (dp.active.(proc) <- d;
+              assert (D.is_mine d proc);
+              D.pop d
+             )
+           else D.steal d
+         in
+         push_if_needed dp d;
+         a
+    | None -> raise D.Empty
+  with D.Empty | Exit -> steal dp proc
   
 let rec mug (dp: 'a t) (proc: int) : 'a =
   try
-    let d = Q.pop dp.mugging in
-    if D.cas_state d Resumable (Active proc) then
-      (* We now own the deque; it may be empty but that's OK *)
-      (dp.active.(proc) <- d;
-       (* assert (check_actives dp); *)
-       assert (D.is_mine d proc);
-       let a = D.pop d in
-       a)
-    else
-  (* Deque was already resumed; just steal from it.*)
-      (* mug dp proc *)
-      D.steal d
-  with Exit -> mug dp proc
-     | Q.Empty -> steal dp proc
+    match Q.pop_opt dp.mugging with
+    | Some d ->
+       if D.cas_state d Resumable (Active proc) then
+         (* We now own the deque; it may be empty but that's OK *)
+         (dp.active.(proc) <- d;
+          (* assert (check_actives dp); *)
+          assert (D.is_mine d proc);
+          let a = D.pop d in
+          a)
+       else
+         (* Deque was already resumed; just steal from it.*)
+         (* mug dp proc *)
+         D.steal d
+    | None -> steal dp proc
+  with D.Empty | Exit -> mug dp proc
 
 let pop (dp: 'a t) (proc: int) : 'a =
   let d = Array.unsafe_get dp.active proc in
   (* assert (check_actives dp); *)
   assert (D.is_mine d proc);
   try D.pop d
-  with Exit -> mug dp proc
+  with D.Empty | Exit -> mug dp proc
 
 let push_local (dp: 'a t) (proc: int) (v: 'a) : unit =
   let d = Array.unsafe_get dp.active proc in

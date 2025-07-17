@@ -44,6 +44,7 @@ let get_work work_bitfield p =
   (Int.logand work (prio_mask p)) <> 0
 
 let rec set_work work_bitfield p =
+  Printf.printf "Setting %d" p;
   let work = Atomic.get work_bitfield in
   if (Int.logand work (prio_mask p)) = 0 then
     let new_work = Int.logor work (prio_mask p) in
@@ -70,8 +71,11 @@ let rec lin_scan work p =
   else
     if (Int.logand work (prio_mask p)) <> 0 then p
     else lin_scan work (p - 1)
-  
+
 let highest_with_work work_bitfield =
   let work = Atomic.get work_bitfield in
-  lin_scan work (count ())
+  let p = lin_scan work (count () + 1)
+  in
+  Printf.printf "Highest: %d\n%!" p;
+  p
   

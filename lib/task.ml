@@ -21,7 +21,9 @@ type pool_data = {
   dls          : int Domain.DLS.key;
   work_tracker : P.work_tracker;
   io_waiting   : (unit -> bool) list Atomic.t array
-}
+  }
+
+exception Empty = Dpool.D.Empty
 
 type pool = pool_data option Atomic.t
 
@@ -184,6 +186,7 @@ let step (type a) (f : a -> unit) (v : a) : unit =
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
+  Printf.printf "pushing at %d\n%!" (P.toInt prio);
   Dpool.push_local pd.deque_pools.(P.toInt prio) (my_id pd)
     (Work (fun _ -> step (do_task f) p));
   P.set_work pd.work_tracker prio;
@@ -215,6 +218,7 @@ let rec worker pd =
   let prio = P.highest_with_work pd.work_tracker in
 
   try
+    Printf.printf "%d looking at %d\n%!" (my_id pd) (P.toInt prio);
     match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
     with
     | Quit -> ()
@@ -229,7 +233,7 @@ let rec worker pd =
        set_my_prio pd prio;
        f ();
        worker pd
-  with Exit ->
+  with Empty | Exit ->
     (P.clear_work pd.work_tracker prio;
      ( (* Check again *)
        try
@@ -248,7 +252,7 @@ let rec worker pd =
             set_my_prio pd prio;
             f ();
             worker pd
-       with Exit ->
+       with Empty | Exit ->
          (Domain.cpu_relax ();
           worker pd)
      )
@@ -264,12 +268,13 @@ let run (type a) pool (f : unit -> a) : a =
   let p = Atomic.make (Pending []) in
   step (fun _ -> do_task f p) ();
   let rec loop () : a =
+    let _ = Printf.printf "%d\n%!" (my_id pd) in
     let _ = check_io pd (my_id pd) in
     match Atomic.get p with
     | Pending _ ->
        begin
          let prio = P.highest_with_work pd.work_tracker in
-
+         Printf.printf "%d looking at %d\n%!" (my_id pd) (P.toInt prio);
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
            with
@@ -284,7 +289,7 @@ let run (type a) pool (f : unit -> a) : a =
               set_my_prio pd prio;
               f ()
            | Quit -> failwith "Task.run: tasks are active on pool"
-         with Exit ->
+         with Empty | Exit ->
            (P.clear_work pd.work_tracker prio;
             (* Check again *)
             (try 
@@ -302,7 +307,7 @@ let run (type a) pool (f : unit -> a) : a =
                   set_my_prio pd prio;
                   f ()
                | Quit -> failwith "Task.run: tasks are active on pool"
-             with Exit ->
+             with Empty | Exit ->
                (Domain.cpu_relax ())))
        end;
        loop ()
