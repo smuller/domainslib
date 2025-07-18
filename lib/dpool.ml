@@ -127,9 +127,10 @@ let push_if_needed (dp: 'a t) (d: 'a deque) : unit =
     Q.push dp.regular d
              
 let rec steal (dp: 'a t) (proc: int) : 'a =
-  try
-    match Q.pop_opt dp.regular with
-    | Some d ->
+  match Q.pop_opt dp.regular with
+  | Some d ->
+     begin
+       try
        if D.is_mine d proc then
          (assert (D.count d = 0);
           steal dp proc)
@@ -145,13 +146,16 @@ let rec steal (dp: 'a t) (proc: int) : 'a =
          in
          push_if_needed dp d;
          a
-    | None -> raise D.Empty
-  with D.Empty | Exit -> steal dp proc
+       with D.Empty | Exit -> steal dp proc
+     end
+  | None -> Printf.printf "Exit the loop!\n%!"; raise D.Empty
+
   
 let rec mug (dp: 'a t) (proc: int) : 'a =
-  try
-    match Q.pop_opt dp.mugging with
-    | Some d ->
+  match Q.pop_opt dp.mugging with
+  | Some d ->
+     begin
+     try
        if D.cas_state d Resumable (Active proc) then
          (* We now own the deque; it may be empty but that's OK *)
          (dp.active.(proc) <- d;
@@ -163,8 +167,10 @@ let rec mug (dp: 'a t) (proc: int) : 'a =
          (* Deque was already resumed; just steal from it.*)
          (* mug dp proc *)
          D.steal d
-    | None -> steal dp proc
-  with D.Empty | Exit -> mug dp proc
+     with D.Empty | Exit -> mug dp proc
+     end
+  | None -> steal dp proc
+
 
 let pop (dp: 'a t) (proc: int) : 'a =
   let d = Array.unsafe_get dp.active proc in

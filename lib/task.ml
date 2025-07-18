@@ -218,12 +218,13 @@ let rec worker pd =
   let prio = P.highest_with_work pd.work_tracker in
 
   try
-    Printf.printf "%d looking at %d\n%!" (my_id pd) (P.toInt prio);
+    Printf.printf "%d looooooking at %d\n%!" (my_id pd) (P.toInt prio);
     match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
     with
-    | Quit -> ()
+    | Quit -> Printf.printf "QUIT!?!?!?\n%!"; ()
     | Work f ->
-       (if P.plt (my_prio pd) prio then
+       (Printf.printf "found\n%!";
+        if P.plt (my_prio pd) prio then
           begin
             Dpool.push_deque_to_mug
               pd.deque_pools.(P.toInt (my_prio pd))
@@ -236,6 +237,7 @@ let rec worker pd =
   with Empty | Exit ->
     (P.clear_work pd.work_tracker prio;
      ( (* Check again *)
+       Printf.printf "%d looking again\n%!" (my_id pd);
        try
          match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
          with
@@ -253,10 +255,11 @@ let rec worker pd =
             f ();
             worker pd
        with Empty | Exit ->
-         (Domain.cpu_relax ();
-          worker pd)
+                     ((* Domain.cpu_relax (); *)
+                      worker pd)
      )
     )
+       | _ -> Printf.printf "SOMETHING ELSE?!!?!?!\n%!"
 
 let worker pd =
   Domain_local_await.using
