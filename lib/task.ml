@@ -21,7 +21,9 @@ type pool_data = {
   dls          : int Domain.DLS.key;
   work_tracker : P.work_tracker;
   io_waiting   : (unit -> bool) list Atomic.t array
-}
+  }
+
+exception Empty = Dpool.D.Empty
 
 type pool = pool_data option Atomic.t
 
@@ -229,7 +231,7 @@ let rec worker pd =
        set_my_prio pd prio;
        f ();
        worker pd
-  with Exit ->
+  with Empty | Exit ->
     (P.clear_work pd.work_tracker prio;
      ( (* Check again *)
        try
@@ -248,9 +250,9 @@ let rec worker pd =
             set_my_prio pd prio;
             f ();
             worker pd
-       with Exit ->
-         (Domain.cpu_relax ();
-          worker pd)
+       with Empty | Exit ->
+                     ((* Domain.cpu_relax (); *)
+                      worker pd)
      )
     )
 
@@ -269,7 +271,6 @@ let run (type a) pool (f : unit -> a) : a =
     | Pending _ ->
        begin
          let prio = P.highest_with_work pd.work_tracker in
-
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
            with
@@ -284,7 +285,7 @@ let run (type a) pool (f : unit -> a) : a =
               set_my_prio pd prio;
               f ()
            | Quit -> failwith "Task.run: tasks are active on pool"
-         with Exit ->
+         with Empty | Exit ->
            (P.clear_work pd.work_tracker prio;
             (* Check again *)
             (try 
@@ -302,7 +303,7 @@ let run (type a) pool (f : unit -> a) : a =
                   set_my_prio pd prio;
                   f ()
                | Quit -> failwith "Task.run: tasks are active on pool"
-             with Exit ->
+             with Empty | Exit ->
                (Domain.cpu_relax ())))
        end;
        loop ()

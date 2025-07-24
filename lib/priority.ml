@@ -70,8 +70,7 @@ let rec lin_scan work p =
   else
     if (Int.logand work (prio_mask p)) <> 0 then p
     else lin_scan work (p - 1)
-  
+
 let highest_with_work work_bitfield =
   let work = Atomic.get work_bitfield in
-  lin_scan work (count ())
-  
+  lin_scan work (count () + 1)  
