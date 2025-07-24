@@ -148,7 +148,7 @@ let rec steal (dp: 'a t) (proc: int) : 'a =
          a
        with D.Empty | Exit -> steal dp proc
      end
-  | None -> Printf.printf "Exit the loop!\n%!"; raise D.Empty
+  | None -> raise D.Empty
 
   
 let rec mug (dp: 'a t) (proc: int) : 'a =

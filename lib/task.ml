@@ -186,7 +186,6 @@ let step (type a) (f : a -> unit) (v : a) : unit =
 let async pool ?(prio=(my_prio (get_pool_data pool))) f =
   let pd = get_pool_data pool in
   let p = Atomic.make (Pending []) in
-  Printf.printf "pushing at %d\n%!" (P.toInt prio);
   Dpool.push_local pd.deque_pools.(P.toInt prio) (my_id pd)
     (Work (fun _ -> step (do_task f) p));
   P.set_work pd.work_tracker prio;
@@ -218,13 +217,11 @@ let rec worker pd =
   let prio = P.highest_with_work pd.work_tracker in
 
   try
-    Printf.printf "%d looooooking at %d\n%!" (my_id pd) (P.toInt prio);
     match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
     with
-    | Quit -> Printf.printf "QUIT!?!?!?\n%!"; ()
+    | Quit -> ()
     | Work f ->
-       (Printf.printf "found\n%!";
-        if P.plt (my_prio pd) prio then
+       (if P.plt (my_prio pd) prio then
           begin
             Dpool.push_deque_to_mug
               pd.deque_pools.(P.toInt (my_prio pd))
@@ -237,7 +234,6 @@ let rec worker pd =
   with Empty | Exit ->
     (P.clear_work pd.work_tracker prio;
      ( (* Check again *)
-       Printf.printf "%d looking again\n%!" (my_id pd);
        try
          match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
          with
@@ -259,7 +255,6 @@ let rec worker pd =
                       worker pd)
      )
     )
-       | _ -> Printf.printf "SOMETHING ELSE?!!?!?!\n%!"
 
 let worker pd =
   Domain_local_await.using
@@ -271,13 +266,11 @@ let run (type a) pool (f : unit -> a) : a =
   let p = Atomic.make (Pending []) in
   step (fun _ -> do_task f p) ();
   let rec loop () : a =
-    let _ = Printf.printf "%d\n%!" (my_id pd) in
     let _ = check_io pd (my_id pd) in
     match Atomic.get p with
     | Pending _ ->
        begin
          let prio = P.highest_with_work pd.work_tracker in
-         Printf.printf "%d looking at %d\n%!" (my_id pd) (P.toInt prio);
          try 
            match Dpool.pop pd.deque_pools.(P.toInt prio) (my_id pd)
            with
